@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 3
+          fetch-depth: 0
 
       - name: Environment
         run: |
@@ -23,10 +23,12 @@ jobs:
 
       - name: Build baseline (A)
         run: |
-          git show HEAD~2:source/backend/cpu/arm/arm64/MNNPackedMatMul.S > /tmp/S.baseline
+          BASE=$(git merge-base origin/master HEAD)
+          echo "merge-base with master: $BASE"
+          git show "$BASE":source/backend/cpu/arm/arm64/MNNPackedMatMul.S > /tmp/S.baseline
           cp source/backend/cpu/arm/arm64/MNNPackedMatMul.S /tmp/S.prefetch
           cp /tmp/S.baseline source/backend/cpu/arm/arm64/MNNPackedMatMul.S
-          diff <(git show HEAD~2:source/backend/cpu/arm/arm64/MNNPackedMatMul.S) /tmp/S.prefetch || true
+          diff /tmp/S.baseline /tmp/S.prefetch || true
           cmake -S . -B buildA -DCMAKE_BUILD_TYPE=Release -DMNN_BUILD_TEST=ON
           cmake --build buildA -j"$(nproc)" > buildA.log 2>&1 || { tail -50 buildA.log; exit 1; }
           tail -3 buildA.log
