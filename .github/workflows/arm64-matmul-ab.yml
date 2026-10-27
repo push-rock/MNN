@@ -54,10 +54,14 @@ jobs:
       - name: Runtime path probe
         run: |
           sudo apt-get install -y -qq gdb > /dev/null 2>&1 || true
+          file buildB/run_test.out
+          nm -a buildB/run_test.out | grep -w 'MNNPackedMatMul' || echo 'NM: symbol not found'
+          readelf -s buildB/run_test.out | grep -w 'MNNPackedMatMul' || echo 'READELF: symbol not found'
           cd buildB
-          gdb -batch -ex "set pagination off" -ex "break MNNPackedMatMul" -ex "run" \
+          gdb -batch -ex "set pagination off" -ex "info functions MNNPackedMatMul" \
+              -ex "break MNNCoreFunctionInit" -ex "break MNNPackedMatMul" -ex "run" \
               --args ./run_test.out op/matmul 0 1 1 > /tmp/gdb.txt 2>&1 || true
-          grep -E "Breakpoint 1,|Function.*not defined" /tmp/gdb.txt || echo 'WARNING: probe result unclear'
+          head -40 /tmp/gdb.txt
 
       - name: Correctness gate
         run: |
