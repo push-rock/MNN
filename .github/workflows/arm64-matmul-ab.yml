@@ -1,0 +1,123 @@
+name: arm64-matmul-prefetch-ab
+
+on:
+  push:
+    branches:
+      - bench/matmul-l2-prefetch
+  workflow_dispatch:
+
+jobs:
+  ab:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+
+      - name: Environment
+        run: |
+          nproc
+          lscpu | grep -E 'Model name|L1d|L2|L3|MHz' || true
+          cmake --version | head -1
+
+      - name: Build baseline (A)
+        run: |
+          git show HEAD~2:source/backend/cpu/arm/arm64/MNNPackedMatMul.S > /tmp/S.baseline
+          cp source/backend/cpu/arm/arm64/MNNPackedMatMul.S /tmp/S.prefetch
+          cp /tmp/S.baseline source/backend/cpu/arm/arm64/MNNPackedMatMul.S
+          diff <(git show HEAD~2:source/backend/cpu/arm/arm64/MNNPackedMatMul.S) /tmp/S.prefetch || true
+          cmake -S . -B buildA -DCMAKE_BUILD_TYPE=Release -DMNN_BUILD_TEST=ON
+          cmake --build buildA -j"$(nproc)" > buildA.log 2>&1 || { tail -50 buildA.log; exit 1; }
+          tail -3 buildA.log
+
+      - name: Build with prefetch (B)
+        run: |
+          cp /tmp/S.prefetch source/backend/cpu/arm/arm64/MNNPackedMatMul.S
+          cmake -S . -B buildB -DCMAKE_BUILD_TYPE=Release -DMNN_BUILD_TEST=ON
+          cmake --build buildB -j"$(nproc)" > buildB.log 2>&1 || { tail -50 buildB.log; exit 1; }
+          tail -3 buildB.log
+
+      - name: Disassembly check
+        run: |
+          objA=$(find buildA -name '*.o' | grep 'MNNPackedMatMul\.S\.o$' | head -1)
+          objB=$(find buildB -name '*.o' | grep 'MNNPackedMatMul\.S\.o$' | head -1)
+          echo "objA=$objA"
+          echo "objB=$objB"
+          echo '--- baseline prfm count (expect 0):'
+          objdump -d "$objA" | grep -c prfm || true
+          echo '--- patched prfm count (expect 2):'
+          objdump -d "$objB" | grep -c prfm || true
+          echo '--- patched prfm instructions:'
+          objdump -d "$objB" | grep prfm || true
+
+      - name: Runtime path probe
+        run: |
+          sudo apt-get install -y -qq gdb > /dev/null 2>&1 || true
+          cd buildB
+          gdb -batch -ex "set pagination off" -ex "break MNNPackedMatMul" -ex "run" \
+              --args ./run_test.out op/matmul 0 1 1 > /tmp/gdb.txt 2>&1 || true
+          grep -E "Breakpoint 1,|Function.*not defined" /tmp/gdb.txt || echo 'WARNING: probe result unclear'
+
+      - name: Correctness gate
+        run: |
+          for side in buildA buildB; do
+            echo "=== $side op/matmul ==="
+            (cd "$side" && ./run_test.out op/matmul 0 1 1) | tail -4
+            echo "=== $side op/matmulBConst ==="
+            (cd "$side" && ./run_test.out op/matmulBConst 0 1 1) | tail -4
+          done
+
+      - name: Interleaved A/B timing
+        run: |
+          mkdir -p timing
+          for r in 1 2 3; do
+            (cd buildA && ./run_test.out speed/MatMulTest 0 1 1)       > timing/A_MatMul_r${r}.txt 2>&1
+            (cd buildB && ./run_test.out speed/MatMulTest 0 1 1)       > timing/B_MatMul_r${r}.txt 2>&1
+            (cd buildA && ./run_test.out speed/MatMulBConstTest 0 1 1) > timing/A_BConst_r${r}.txt 2>&1
+            (cd buildB && ./run_test.out speed/MatMulBConstTest 0 1 1) > timing/B_BConst_r${r}.txt 2>&1
+          done
+
+      - name: Aggregate results
+        run: |
+          python3 - <<'EOF'
+          import re, statistics, os
+          pat = re.compile(r'\[(\d+), (\d+), (\d+)\], Avg time: ([0-9.]+) ms')
+          def parse(path):
+              seen = {}
+              for line in open(path, errors='ignore'):
+                  m = pat.search(line)
+                  if m:
+                      seen[tuple(int(x) for x in m.groups()[:3])] = float(m.group(4))
+              return seen
+          def collect(prefix, test):
+              rounds = [parse(f'timing/{prefix}_{test}_r{r}.txt') for r in (1, 2, 3)]
+              med, spread = {}, {}
+              for k in rounds[0]:
+                  vals = [row[k] for row in rounds if k in row]
+                  if vals:
+                      med[k] = statistics.median(vals)
+                      spread[k] = (min(vals), max(vals))
+              return med, spread
+          lines = ['# A/B: baseline vs L2-prefetch (positive delta% = patched faster)',
+                   '', '| test | shape (e,l,h) | A med ms | B med ms | delta% | A spread | B spread |',
+                   '|---|---|---|---|---|---|---|']
+          for test in ('MatMul', 'BConst'):
+              A, As = collect('A', test)
+              B, Bs = collect('B', test)
+              for k in A:
+                  if k in B and A[k] > 0:
+                      d = (A[k] - B[k]) / A[k] * 100.0
+                      lines.append('| %s | %s | %.3f | %.3f | %+.1f%% | %.2f-%.2f | %.2f-%.2f |'
+                                   % (test, str(k), A[k], B[k], d, *As[k], *Bs[k]))
+          text = '\n'.join(lines)
+          print(text)
+          with open(os.environ.get('GITHUB_STEP_SUMMARY', '/dev/null'), 'a') as f:
+              f.write(text + '\n')
+          open('timing/summary.md', 'w').write(text)
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: timing-results
+          path: timing/
