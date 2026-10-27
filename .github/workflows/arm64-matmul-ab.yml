@@ -57,13 +57,18 @@ jobs:
         run: |
           sudo apt-get install -y -qq gdb > /dev/null 2>&1 || true
           file buildB/run_test.out
-          nm -a buildB/run_test.out | grep -w 'MNNPackedMatMul' || echo 'NM: symbol not found'
-          readelf -s buildB/run_test.out | grep -w 'MNNPackedMatMul' || echo 'READELF: symbol not found'
+          ls buildB/*.so buildA/*.so 2>/dev/null || true
+          echo '--- RPATH of each binary (each must load its own build dir .so):'
+          readelf -d buildA/run_test.out | grep -E 'RPATH|RUNPATH' || true
+          readelf -d buildB/run_test.out | grep -E 'RPATH|RUNPATH' || true
+          md5sum buildA/libMNN.so buildB/libMNN.so
+          echo '--- symbol in libMNN.so (full symtab, hidden symbols are local):'
+          nm -a buildB/libMNN.so | grep -w 'MNNPackedMatMul' || echo 'NM .so: symbol not found'
           cd buildB
-          gdb -batch -ex "set pagination off" -ex "info functions MNNPackedMatMul" \
-              -ex "break MNNCoreFunctionInit" -ex "break MNNPackedMatMul" -ex "run" \
+          gdb -batch -ex "set pagination off" -ex "set breakpoint pending on" \
+              -ex "break MNNPackedMatMul" -ex "run" \
               --args ./run_test.out op/matmul 0 1 1 > /tmp/gdb.txt 2>&1 || true
-          head -40 /tmp/gdb.txt
+          head -30 /tmp/gdb.txt
 
       - name: Correctness gate
         run: |
