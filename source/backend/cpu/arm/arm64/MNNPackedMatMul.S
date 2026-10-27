@@ -84,6 +84,9 @@ LoopH:
     cmp x12, #2
     blt L1
     LoopL2:
+        // Prefetch 2 iterations ahead: A advances 96 bytes/iter, B 64 bytes/iter
+        prfm pldl1keep, [x15, #192]
+        prfm pldl1keep, [x2, #128]
         ld1 {v3.4s, v4.4s}, [x2], #32
         ld1 {v0.4s, v1.4s, v2.4s}, [x15], #48
 
